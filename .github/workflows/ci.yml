@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bash syntax
+        run: |
+          for f in autopush.sh autoclone.sh; do
+            bash -n "$f"
+          done
+
+      - name: ShellCheck
+        run: shellcheck --severity=warning autopush.sh autoclone.sh
+
+      - name: Line endings
+        run: |
+          if grep -rIl $'\r' --exclude-dir=.git .; then
+            echo "CRLF line endings found in the files above"
+            exit 1
+          fi
+
+      - name: Leaked secrets
+        run: |
+          if grep -rInE --exclude-dir=.git 'gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{50,}' .; then
+            echo "Something that looks like a GitHub token was found"
+            exit 1
+          fi
+
+      - name: Version consistency
+        run: |
+          a=$(sed -n 's/^VERSION="\(.*\)"/\1/p' autopush.sh)
+          b=$(sed -n 's/^VERSION="\(.*\)"/\1/p' autoclone.sh)
+          c=$(sed -n 's/^## \[\([0-9][^]]*\)\].*/\1/p' CHANGELOG.md | head -n 1)
+          echo "autopush=$a autoclone=$b changelog=$c"
+          [ -n "$a" ] && [ "$a" = "$b" ] && [ "$a" = "$c" ]
+
+  test:
+    name: Test (${{ matrix.os }})
+    needs: lint
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            sh: bash
+          - os: macos-latest
+            sh: /bin/bash
+          - os: windows-latest
+            sh: bash
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Environment
+        run: |
+          ${{ matrix.sh }} --version | head -n 1
+          git --version
+
+      - name: Syntax
+        run: |
+          for f in autopush.sh autoclone.sh; do
+            ${{ matrix.sh }} -n "$f"
+          done
+
+      - name: Version and help
+        run: |
+          for f in autopush.sh autoclone.sh; do
+            ${{ matrix.sh }} "$f" --version
+            ${{ matrix.sh }} "$f" --help
+          done
+
+      - name: Rejects bad input
+        run: |
+          check() {
+            want=$1; shift
+            set +e
+            "$@" >/dev/null 2>&1 </dev/null
+            got=$?
+            set -e
+            [ "$got" = "$want" ] || { echo "expected exit $want, got $got: $*"; exit 1; }
+          }
+          check 2 ${{ matrix.sh }} autopush.sh --unknown-option
+          check 2 ${{ matrix.sh }} autoclone.sh --unknown-option
+          check 2 ${{ matrix.sh }} autopush.sh --yes --no-color --repo https://github.com/octocat/hello --folder ./does-not-exist
+          check 2 ${{ matrix.sh }} autoclone.sh --yes --no-color
+          check 2 ${{ matrix.sh }} autoclone.sh --yes --no-color --repo not-a-repo

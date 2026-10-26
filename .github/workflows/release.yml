@@ -1,0 +1,45 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Publish release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag against the scripts
+        run: |
+          tag=${GITHUB_REF_NAME#v}
+          for f in autopush.sh autoclone.sh; do
+            v=$(sed -n 's/^VERSION="\(.*\)"/\1/p' "$f")
+            [ "$v" = "$tag" ] || { echo "$f is version $v but the tag is $tag"; exit 1; }
+          done
+
+      - name: Extract release notes
+        run: |
+          tag=${GITHUB_REF_NAME#v}
+          awk -v v="$tag" '
+            $0 ~ "^## \\[" v "\\]" { on = 1; next }
+            on && /^## \[/ { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          [ -s notes.md ] || { echo "No changelog entry for $tag"; exit 1; }
+          cat notes.md
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            autopush.sh autoclone.sh \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md \
+            --verify-tag
